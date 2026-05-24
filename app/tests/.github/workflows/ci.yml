@@ -1,0 +1,146 @@
+# =============================================================
+# GitHub Actions CI/CD Pipeline
+# =============================================================
+# This pipeline runs automatically every time code is pushed.
+# It does 3 things in order:
+#   1. Checks code style (linting)
+#   2. Runs unit tests
+#   3. Confirms the Docker container builds successfully
+
+name: Heart Disease MLOps CI Pipeline
+
+# Trigger: run this pipeline on every push to main branch
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+
+  # ===========================================================
+  # JOB 1: LINT — Check code formatting and style
+  # ===========================================================
+  lint:
+    name: Code Linting
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install flake8 linter
+        run: pip install flake8
+
+      - name: Run linting on app code
+        run: |
+          # Check for syntax errors and undefined variables
+          flake8 app/main.py --max-line-length=120 --select=E9,F63,F7,F82
+          echo "✅ Linting passed!"
+
+  # ===========================================================
+  # JOB 2: TEST — Run unit tests
+  # ===========================================================
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint  # Only runs if lint job passes
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest ucimlrepo
+
+      - name: Generate model and data files
+        run: |
+          # Run the training script to produce model pickle files
+          python -c "
+          from ucimlrepo import fetch_ucirepo
+          import pandas as pd
+          import pickle
+          from sklearn.ensemble import RandomForestClassifier
+          from sklearn.model_selection import train_test_split
+
+          # Load and prepare data
+          heart_disease = fetch_ucirepo(id=45)
+          df = pd.concat([heart_disease.data.features, heart_disease.data.targets], axis=1)
+          df.columns = [*heart_disease.data.features.columns, 'target']
+          df['target'] = (df['target'] > 0).astype(int)
+          df['ca'].fillna(df['ca'].median(), inplace=True)
+          df['thal'].fillna(df['thal'].median(), inplace=True)
+          df.drop_duplicates(inplace=True)
+          df.to_csv('heart_disease_cleaned.csv', index=False)
+
+          # Train and save model
+          X = df.drop('target', axis=1)
+          y = df['target']
+          X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+          model = RandomForestClassifier(n_estimators=100, random_state=42)
+          model.fit(X_train, y_train)
+          pickle.dump(model, open('heart_disease_model.pkl', 'wb'))
+          pickle.dump(list(X.columns), open('feature_columns.pkl', 'wb'))
+          print('Model files generated!')
+          "
+
+      - name: Run unit tests
+        run: |
+          pytest tests/test_model.py -v
+          echo "✅ All tests passed!"
+
+  # ===========================================================
+  # JOB 3: DOCKER — Build the container
+  # ===========================================================
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: test  # Only runs if tests pass
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python and generate model files
+        run: |
+          pip install ucimlrepo scikit-learn pandas
+          python -c "
+          from ucimlrepo import fetch_ucirepo
+          import pandas as pd
+          import pickle
+          from sklearn.ensemble import RandomForestClassifier
+          from sklearn.model_selection import train_test_split
+
+          heart_disease = fetch_ucirepo(id=45)
+          df = pd.concat([heart_disease.data.features, heart_disease.data.targets], axis=1)
+          df.columns = [*heart_disease.data.features.columns, 'target']
+          df['target'] = (df['target'] > 0).astype(int)
+          df['ca'].fillna(df['ca'].median(), inplace=True)
+          df['thal'].fillna(df['thal'].median(), inplace=True)
+          df.to_csv('heart_disease_cleaned.csv', index=False)
+
+          X = df.drop('target', axis=1)
+          y = df['target']
+          X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+          model = RandomForestClassifier(n_estimators=100, random_state=42)
+          model.fit(X_train, y_train)
+          pickle.dump(model, open('heart_disease_model.pkl', 'wb'))
+          pickle.dump(list(X.columns), open('feature_columns.pkl', 'wb'))
+          "
+
+      - name: Build Docker image
+        run: |
+          docker build -t heart-disease-api .
+          echo "✅ Docker image built successfully!"
